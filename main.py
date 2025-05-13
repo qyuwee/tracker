@@ -1,29 +1,22 @@
 import math
 import cv2 as cv
-import numpy as np
 from collections import deque
-import matplotlib.pyplot as plt
+import time
 
 tracker = cv.TrackerCSRT.create()
 
+# frame_count = 0
+# start_time = time.time()
+fps = 11  # ВВЕДИТЕ СЮДА ПРИМЕРНОЕ ЗНАЧЕНИЕ ВАШЕГО ФПС. КАК ЕГО УЗНАТЬ ЧИТАЙТЕ В README
 trajectory_x = deque([0] * 2, maxlen=2)
 trajectory_y = deque([0] * 2, maxlen=2)
-dq_speed = deque([0] * 15, maxlen=15)
-dq_speed_x = deque([0] * 15, maxlen=15)
-dq_speed_y = deque([0] * 15, maxlen=15)
-s = 0
-s_x = 0
-s_y = 0
-dist_x = 0
-dist_y = 0
-# 15 - примерное количество фпс у меня на камере, поэтому для того, чтобы считать скорость в секунду
-# буду каждые 15 тиков считать. Фпс можно посмотреть спомощью пары функций и таймера
-# PS: У меня их примерно 15 оказывается
-# пояснение к трекеру: я использую метод, который автоматически отслеживает выбранный с помощью функции ROI объект
-# Он не точен и со времен теряет объект из поля отслеживания, либо границы немного слетают. В идеале писать такой трекер
-# самому, но для этого необходимо предварительно знать объект и его специфику
-# (например, что нам нужен самый большой объект красного цвета, такое написать самому вполне легко).
-# Иначе возможно пользование только таким трекером.
+alpha = 0.325  # коэффицент сглаживания рассчёта скорости движения объекта. Чем он >, тем быстрее меняется скорость
+speed, speed_x, speed_y = 0, 0, 0
+dist_x, dist_y = 0, 0
+border_left = 220
+border_right = 420
+border_top = 140
+border_bottom = 340
 
 cap = cv.VideoCapture(0)
 _, frame = cap.read()
@@ -37,94 +30,95 @@ def drawRectangle(frame, bbox):
     p2 = (int(bbox[0] + bbox[2]), int(bbox[1] + bbox[3]))
     trajectory_x.append(p1[0] + (p2[0] - p1[0]) // 2)
     trajectory_y.append(p1[1] + (p2[1] - p1[1]) // 2)
-    # cv.circle(frame, (p1[0] + (p2[0] - p1[0]) // 2, p1[1] + (p2[1] - p1[1]) // 2), 2, (255, 0, 0), 1)
     cv.rectangle(frame, p1, p2, (255, 0, 0), 2, 1)
 
 
-def calculateSpeed(frame, trajectory_x, trajectory_y, speed_x, speed_y, speed):
-    a = abs(trajectory_x[1] - trajectory_x[0])
-    speed_x += a
-    speed_x -= dq_speed_x[0]
-    dq_speed_x.append(a)
-    b = abs(trajectory_y[1] - trajectory_y[0])
-    speed_y += b
-    speed_y -= dq_speed_y[0]
-    dq_speed_y.append(b)
-    c = int(math.sqrt(a**2 + b**2))
-    speed += c
-    speed -= dq_speed[0]
-    dq_speed.append(c)
-    if dq_speed[-1] < 10 and dq_speed[-2] < 10:  # Есть небольшая проблема, что при остановке объекта, ещё секунду
-        # отображается его скорость до того момента, как он остановился. Данным методом можно решить эту проблему, но он
-        # достаточно костыльный. Если не лень то можно и для speed_x и speed_y такое сделать
-        cv.putText(frame, str((dq_speed[-1] + dq_speed[-2] // 2)) + 'pixel/sec',
-                   (int(cap.get(cv.CAP_PROP_FRAME_WIDTH)) - 120, 60), 1, 1, (0, 255, 0))
-    else:
-        cv.putText(frame, str(speed) + 'pixel/sec', (int(cap.get(cv.CAP_PROP_FRAME_WIDTH))-120, 60),
-                   1, 1, (0, 255, 0))
-    cv.putText(frame, str(speed_x) + 'Vx pixel/sec', (int(cap.get(cv.CAP_PROP_FRAME_WIDTH))-120, 80),
+def calculateSpeed(frame, trajectory_x, trajectory_y):
+    global speed_x, speed_y, speed
+
+    a = abs(trajectory_x[1] - trajectory_x[0]) * fps  # Текущая скорость X
+    b = abs(trajectory_y[1] - trajectory_y[0]) * fps  # Текущая скорость Y
+    c = int(math.sqrt(a ** 2 + b ** 2))  # Текущая общая скорость
+
+    # EMA (Экспоненциальное скользящее среднее), вместо очередей (так называемая оптимизация)
+    speed_x = int(alpha * a + (1 - alpha) * speed_x)
+    speed_y = int(alpha * b + (1 - alpha) * speed_y)
+    speed = int(alpha * c + (1 - alpha) * speed)
+
+    cv.putText(frame, str(speed) + 'pixel/sec', (width-120, 60),
                1, 1, (0, 255, 0))
-    cv.putText(frame, str(speed_y) + 'Vy pixel/sec', (int(cap.get(cv.CAP_PROP_FRAME_WIDTH))-120, 100),
+    cv.putText(frame, str(speed_x) + 'Vx pixel/sec', (width-120, 80),
                1, 1, (0, 255, 0))
-    return speed_x, speed_y, speed
+    cv.putText(frame, str(speed_y) + 'Vy pixel/sec', (width-120, 100),
+               1, 1, (0, 255, 0))
 
 
-def displayRectangle(frame, bbox):
-    plt.figure(figsize=(20, 10))
-    frameCopy = frame.copy()
-    drawRectangle(frameCopy, bbox)
-    frameCopy = cv.cvtColor(frameCopy, cv.COLOR_RGB2BGR)
-    plt.imshow(frameCopy)
-    plt.axis("off")
+def check_borders(cx, cy):
+    left = right = top = bottom = False
+    dist_x = dist_y = 0
+
+    if cx < border_left:
+        left = True
+        dist_x = border_left - cx
+    elif cx > border_right:
+        right = True
+        dist_x = cx - border_right
+
+    if cy < border_top:
+        top = True
+        dist_y = border_top - cy
+    elif cy > border_bottom:
+        bottom = True
+        dist_y = cy - border_bottom
+
+    return left, right, top, bottom, dist_x, dist_y
 
 
 bbox = cv.selectROI(frame, False)
-displayRectangle(frame, bbox)
+p1 = (int(bbox[0]), int(bbox[1]))
+p2 = (int(bbox[0] + bbox[2]), int(bbox[1] + bbox[3]))
+cv.rectangle(frame, p1, p2, (255, 0, 0), 2, 1)
+cv.imshow("Tracking", frame)
+cv.waitKey(100)
+
 tracker.init(frame, bbox)
 
 left, top, right, bottom = False, False, False, False
 
 while True:
+    # frame_start = time.time()
+
     ok, bbox = tracker.update(frame)
     _, frame = cap.read()
+
+    # frame_count += 1
+    # if frame_count >= 10:
+    #     fps = round(frame_count / (time.time() - start_time), 1)
+    #     start_time = time.time()
+    #     frame_count = 0
+    # cv.putText(frame, "FPS : " + str(int(fps)), (80, 100), 1, 1, (0, 255, 0))
 
     x, y, w, h = map(int, bbox)
     cx, cy = x + w // 2, y + h // 2  # Центр объекта
 
     if ok:
         drawRectangle(frame, bbox)
-        s_x, s_y, s = calculateSpeed(frame, trajectory_x, trajectory_y, 0 + s_x, 0 + s_y, 0 + s)
+        calculateSpeed(frame, trajectory_x, trajectory_y)
 
     point_x = trajectory_x[-1] - trajectory_x[0]
     point_y = trajectory_y[-1] - trajectory_y[0]
 
     cv.line(frame, (70, 70), (70+point_x, 70+point_y), (0, 255, 0), 2)  # Направление движения
 
-    if cx < 220:
-        left = True
-        dist_x = 220 - cx
-    else:
-        left = False
-    if cx > 420:
-        right = True
-        dist_x = cx - 220
-    else:
-        right = False
-    if cy < 140:
-        top = True
-        dist_y = 140 - cy
-    else:
-        top = False
-    if cy > 340:
-        bottom = True
-        dist_y = cy - 340
-    else:
-        bottom = False
+    left, right, top, bottom, dist_x, dist_y = check_borders(cx, cy)
 
-    if 220 < cx < 420 and 140 < cy < 340:  # Ограничивайющий прямоугольник
-        cv.rectangle(frame, (width//2+100, height//2+100), (width//2-100, height//2-100), (0, 255, 0), 2)
-    else:
-        cv.rectangle(frame, (width//2+100, height//2+100), (width//2-100, height//2-100), (0, 0, 255), 2)
+    is_inside = (border_left <= cx <= border_right and border_top <= cy <= border_bottom)
+
+    rect_color = (0, 255, 0) if is_inside else (0, 0, 255)
+    cv.rectangle(frame, (width // 2 - 100, height // 2 - 100), (width // 2 + 100, height // 2 + 100), rect_color, 2)
+
+    if is_inside:
+        dist_x = dist_y = 0
 
     cv.imshow("Tracking", frame)
 
